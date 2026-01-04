@@ -7,6 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+from threading import Lock
 
 from fastapi import APIRouter, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,6 +40,7 @@ class Job:
     result: Optional[Dict[str, Any]]
     instance_id: str
     instance_name: str
+    lock: Lock
 
 
 RUNS_DIR = ".runs"
@@ -62,19 +64,20 @@ api = APIRouter(prefix="/api")
 
 
 def _job_view(j: Job) -> Dict[str, Any]:
-    return {
-        "id": j.id,
-        "status": j.status,
-        "created_at": j.created_at,
-        "started_at": j.started_at,
-        "finished_at": j.finished_at,
-        "error": j.error,
-        "cfg": j.cfg,
-        "history": j.history,
-        "instance_id": j.instance_id,
-        "instance_name": j.instance_name,
-        "has_result": j.result is not None,
-    }
+    with j.lock:
+        return {
+            "id": j.id,
+            "status": j.status,
+            "created_at": j.created_at,
+            "started_at": j.started_at,
+            "finished_at": j.finished_at,
+            "error": j.error,
+            "cfg": j.cfg,
+            "history": j.history,
+            "instance_id": j.instance_id,
+            "instance_name": j.instance_name,
+            "has_result": j.result is not None,
+        }
 
 
 def _instance_view(inst) -> Dict[str, Any]:
@@ -301,8 +304,12 @@ def _save_uploaded_json(file: UploadFile) -> Tuple[str, str, str]:
 
 def _run_job(job_id: str):
     j = JOBS[job_id]
-    j.status = "running"
-    j.started_at = time.time()
+    with j.lock:
+        j.status = "running"
+        j.started_at = time.time()
+        j.error = None
+        j.history = []
+        j.result = None
 
     try:
         inst_rec = INSTANCES.get(j.instance_id)
@@ -321,8 +328,14 @@ def _run_job(job_id: str):
             repair_max_rounds=int(j.cfg["repair_max_rounds"]),
         )
 
-        best, pen, hist = solve(inst, cfg)
-        j.history = hist
+        def on_progress(row: HistoryRow) -> None:
+            with j.lock:
+                j.history.append(row)
+                # prevent unbounded growth if someone runs 50k generations
+                if len(j.history) > 5000:
+                    j.history = j.history[-5000:]
+
+        best, pen, hist = solve(inst, cfg, progress_cb=on_progress)
 
         rows = _build_schedule_rows(best, inst)
         group_rows = _build_group_rows(best, inst)
@@ -330,22 +343,28 @@ def _run_job(job_id: str):
         verify_pen = evaluate(best, inst)
         validation = _validate(best, inst)
 
-        j.result = {
-            "penalty": {"total": pen.total, "hard": pen.hard, "soft": pen.soft, "details": pen.details},
-            "verify_penalty": {"total": verify_pen.total, "hard": verify_pen.hard, "soft": verify_pen.soft, "details": verify_pen.details},
-            "validation": validation,
-            "history": hist,
-            "schedule": rows,
-            "by_group": group_rows,
-            "instance": _instance_view(inst),
-        }
+        with j.lock:
+            # keep final history from solve (it may have more points than emitted cadence)
+            j.history = hist
 
-        j.status = "done"
-        j.finished_at = time.time()
+            j.result = {
+                "penalty": {"total": pen.total, "hard": pen.hard, "soft": pen.soft, "details": pen.details},
+                "verify_penalty": {"total": verify_pen.total, "hard": verify_pen.hard, "soft": verify_pen.soft, "details": verify_pen.details},
+                "validation": validation,
+                "history": hist,
+                "schedule": rows,
+                "by_group": group_rows,
+                "instance": _instance_view(inst),
+            }
+
+            j.status = "done"
+            j.finished_at = time.time()
+
     except Exception as e:
-        j.status = "error"
-        j.error = str(e)
-        j.finished_at = time.time()
+        with j.lock:
+            j.status = "error"
+            j.error = str(e)
+            j.finished_at = time.time()
 
 
 @api.get("/health")
@@ -425,6 +444,7 @@ async def create_job(
         result=None,
         instance_id=inst_id,
         instance_name=inst_name,
+        lock=Lock(),
     )
     JOBS[job_id] = j
 

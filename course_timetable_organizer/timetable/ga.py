@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from timetable.models import Instance, Individual, Penalty
 from timetable.fitness import evaluate
-from timetable.repair import repair, hard_penalty
+from timetable.repair import repair
 
 HistoryRow = Tuple[int, int, int, int]  # (generation, total, hard, soft)
+ProgressCb = Callable[[HistoryRow], None]
 
 _WORKER_INST: Instance | None = None
 _WORKER_USE_REPAIR: bool = False
@@ -31,7 +32,6 @@ def _repair_and_eval_worker(ind: Individual) -> Tuple[Individual, Penalty]:
 
     out = ind
     if _WORKER_USE_REPAIR:
-        # Repair will quickly no-op if already feasible (and your incremental repair is fast)
         out = repair(out, inst, attempts_per_gene=_WORKER_ATTEMPTS,
                      max_rounds=_WORKER_ROUNDS)
 
@@ -61,7 +61,6 @@ def _repair_and_evaluate_population(
             penalties.append(evaluate(out, inst))
         return new_pop, penalties
 
-    # Better load balancing across workers
     chunksize = max(1, len(pop) // (workers * 4))
     results = pool.map(_repair_and_eval_worker, pop, chunksize=chunksize)
     new_pop = [ind for ind, _ in results]
@@ -116,7 +115,12 @@ def _crossover(a: Individual, b: Individual, rate: float) -> Tuple[Individual, I
     return c1, c2
 
 
-def solve(inst: Instance, cfg: GAConfig) -> Tuple[Individual, Penalty, List[HistoryRow]]:
+def solve(
+    inst: Instance,
+    cfg: GAConfig,
+    *,
+    progress_cb: Optional[ProgressCb] = None,
+) -> Tuple[Individual, Penalty, List[HistoryRow]]:
     if cfg.pop_size <= 0:
         raise ValueError("pop_size must be > 0.")
     if cfg.generations <= 0:
@@ -160,6 +164,10 @@ def solve(inst: Instance, cfg: GAConfig) -> Tuple[Individual, Penalty, List[Hist
                       cfg.repair_attempts_per_gene, cfg.repair_max_rounds),
         )
 
+    def emit(row: HistoryRow) -> None:
+        if progress_cb is not None:
+            progress_cb(row)
+
     try:
         pop: List[Individual] = [random_individual()
                                  for _ in range(cfg.pop_size)]
@@ -181,6 +189,7 @@ def solve(inst: Instance, cfg: GAConfig) -> Tuple[Individual, Penalty, List[Hist
 
         history: List[HistoryRow] = [
             (0, best_pen.total, best_pen.hard, best_pen.soft)]
+        emit(history[-1])
 
         if cfg.log_every > 0:
             print(
@@ -193,11 +202,9 @@ def solve(inst: Instance, cfg: GAConfig) -> Tuple[Individual, Penalty, List[Hist
             while len(new_pop) < cfg.pop_size:
                 p1 = _tournament(pop, totals, cfg.tournament_k)
                 p2 = _tournament(pop, totals, cfg.tournament_k)
-
                 c1, c2 = _crossover(p1, p2, cfg.cx_rate)
                 c1 = mutate(c1)
                 c2 = mutate(c2)
-
                 new_pop.append(c1)
                 if len(new_pop) < cfg.pop_size:
                     new_pop.append(c2)
@@ -219,13 +226,17 @@ def solve(inst: Instance, cfg: GAConfig) -> Tuple[Individual, Penalty, List[Hist
                 best = pop[cur_idx]
                 best_pen = cur_pen
 
-            history.append((gen, best_pen.total, best_pen.hard, best_pen.soft))
+            row = (gen, best_pen.total, best_pen.hard, best_pen.soft)
+            history.append(row)
 
-            if cfg.log_every > 0 and gen % cfg.log_every == 0:
+            # emit at same cadence as log_every (and always emit the last generation)
+            if cfg.log_every > 0 and (gen % cfg.log_every == 0 or gen == cfg.generations):
+                emit(row)
                 print(
                     f"gen={gen} best_total={best_pen.total} hard={best_pen.hard} soft={best_pen.soft}", flush=True)
 
             if best_pen.hard == 0 and best_pen.soft == 0:
+                emit(row)
                 break
 
         return best, best_pen, history
