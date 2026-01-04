@@ -1,0 +1,11 @@
+*.csv
+.runs
+__pycache__/
+.ipynb_checkpoints/
+.vscode/
+.env
+*.png
+*.ctt
+node_modules/
+dist/
+test_files/
