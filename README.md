@@ -58,7 +58,3 @@ Open http://localhost:5173 in your browser.
 2. Configure GA parameters (population size, generations, etc.)
 3. Start optimization and monitor progress
 4. Download results as CSV files
-
-## Instance Format
-
-JSON files with timeslots, rooms, courses/sessions, teacher availability, and preferences. See `test_files/` for examples.
