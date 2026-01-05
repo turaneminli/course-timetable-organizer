@@ -10,7 +10,7 @@ export default function ProgressChart({ history }) {
     gen: d.gen,
     total: d.total,
     hard_scaled: d.hard * 1000,
-    soft: d.soft
+    soft: d.soft,
   }));
 
   return (
@@ -21,9 +21,9 @@ export default function ProgressChart({ history }) {
           <YAxis />
           <Tooltip />
           <Legend />
-          <Line type="monotone" dataKey="total" dot={false} />
-          <Line type="monotone" dataKey="hard_scaled" name="hard (x1000)" dot={false} />
-          <Line type="monotone" dataKey="soft" dot={false} />
+          <Line type="monotone" dataKey="total" stroke="red" dot={false} />
+          <Line type="monotone" dataKey="hard_scaled" name="hard (x1000)" stroke="green" dot={false} />
+          <Line type="monotone" dataKey="soft" stroke="blue" dot={false} />
         </LineChart>
       </ResponsiveContainer>
     </div>
